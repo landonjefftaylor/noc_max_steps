@@ -1,0 +1,4 @@
+
+instantiations:
+new state: max_x
+new state: max_y
