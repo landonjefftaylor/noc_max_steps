@@ -1,0 +1,260 @@
+#lang ivy1.7
+attribute method = mc
+
+################################################################################
+################################## IDEAS #######################################
+# 
+# This approach could work pretty well for n-fault tolerance (each link is *)
+# 
+################################################################################
+
+
+################################################################################
+
+type coord
+interpret coord -> bv[3]
+
+type counter
+interpret counter -> bv[4]
+
+type directions = {n,e,s,w,new}
+type statuses = {free,faulty,edge}
+
+var max_x : coord
+var max_y : coord
+
+################################################################################
+
+object spec = {
+  
+  after init {
+  
+    max_x := 4;
+    max_y := 4;
+  
+    node(X,Y).x := X;
+    node(X,Y).y := Y;
+    
+    node(X,Y).has_flit := false;
+    flit.x_pos := *;
+    assume flit.x_pos <= max_x;
+    flit.y_pos := *;
+    assume flit.y_pos <= max_y;
+    node(flit.x_pos,flit.y_pos).has_flit := true;
+    
+    flit.x_dest := *;
+    assume flit.x_dest <= max_x;
+    flit.y_dest := *;
+    assume flit.y_dest <= max_y;
+    
+    node(X,Y).north := free;
+    node(X,Y).east := free;
+    node(X,Y).south := free;
+    node(X,Y).west := free;
+    
+    node(X,max_y).north := edge;
+    node(max_x,Y).east := edge;
+    node(X,0).south := edge;
+    node(0,Y).west := edge;
+    
+  } #init
+  
+} #end spec
+
+################################################################################
+
+object flit = {
+
+  var x_pos : coord
+  var y_pos : coord
+  var steps : counter
+  
+  var x_dest : coord
+  var y_dest : coord
+  
+  var delivered : bool
+  var dropped : bool
+  
+  var dir : directions
+
+  after init {
+    steps := 0;
+    dir := new;
+  } #init
+  
+  action go_to(new_x:coord,new_y:coord) = {
+    x_pos := new_x;
+    y_pos := new_y;
+    node(x_pos,y_pos).has_flit := true;
+    steps := steps + 1;
+  } #end go_to
+  
+} #end flit
+
+################################################################################
+
+module node_template = {
+
+  individual x : coord
+  individual y : coord
+  
+  individual has_flit : bool
+  
+  individual north : statuses
+  individual east  : statuses
+  individual south : statuses
+  individual west : statuses
+  
+  action go_north = {
+    assert ~(north = faulty | north = edge);
+    has_flit := false;
+    flit.dir := n;
+    call flit.go_to(x,y+1);
+    assert node(x,y+1).has_flit;
+  } #end go_north
+  
+  action go_east = {
+    assert ~(east = faulty | east = edge);
+    has_flit := false;
+    flit.dir := e;
+    call flit.go_to(x+1,y);
+    assert node(x+1,y).has_flit;
+  } #end go_east
+  
+  action go_south = {
+    assert ~(south = faulty | south = edge);
+    has_flit := false;
+    flit.dir := s;
+    call flit.go_to(x,y-1);
+    assert node(x,y-1).has_flit;
+  } #end go_south
+  
+  action go_west = {
+    assert ~(west = faulty | west = edge);
+    has_flit := false;
+    flit.dir := w;
+    call flit.go_to(x-1,y);
+    assert node(x-1,y).has_flit;
+  } #end go_west
+    
+  before route {
+    require has_flit;
+    require ~flit.delivered;
+    require ~flit.dropped;
+  } #b4 route
+  
+  action route = {
+    # If the packet has reached its destination, deliver the packet.
+    if (x = flit.x_dest & y = flit.y_dest) {
+      flit.delivered := true;
+    }
+    # else if the packet is one hop away and the corresponding link is available, send on that link
+    else if (x = flit.x_dest) {
+      if (y + 1 = flit.y_dest & north = free) {
+        #go north
+        call go_north;
+      }
+      else if (y = flit.y_dest + 1 & south = free) {
+        #go south
+        call go_south;
+      }
+    }
+    else if (y = flit.y_dest) {
+      if (x + 1 = flit.x_dest & east = free) {
+        #go east
+        call go_east;
+      }
+      else if (x = flit.x_dest + 1 & west = free) {
+        #go west
+        call go_west;
+      }
+    }
+    else {
+      #go west if:
+      # 1)the current node is not on the west edge,
+      # 2)the packet is going in the west/south direction or just injected,
+      # 3)the west link is fault-free, and
+      # 4)the current node is at or east of the destination OR it is at or south of the destination and the south link is faulty
+      if (west = free & (flit.dir = w | flit.dir = s) & (x >= flit.x_dest | (y <= flit.y_dest & south=faulty) ) ) {
+        #go west
+        call go_west;
+      }
+      #else go south if:
+      # 1)the current node is not on the south edge,
+      # 2)the packet is going in the west/south direction or just injected,
+      # 3)the south link is fault-free, and
+      # 4)the current node is at or north of the destination OR
+      # it is at or west of the destination and the west link is faulty
+      else if (south = free & (flit.dir = w | flit.dir = s) & (y >= flit.y_dest | (x <= flit.x_dest & west=faulty) ) ) {
+        #go south
+        call go_south;
+      }
+      #else go east if:
+      # 1)the destination is more than one node to the east OR
+      # the destination is east of the current node AND exactly one row north,
+      # 2)the packet is not traveling west, and
+      # 3)the east link is fault-free
+      else if ( (flit.x_dest > x + 1 | (flit.x_dest > x & flit.y_dest = y + 1)) & flit.dir ~= w & east = free) {
+        #go east
+        call go_east;
+      }
+      #else go north if:
+      # 1)the destination is north of the current node,
+      # 2)the packet is not traveling south, and
+      # 3)the north link is fault-free
+      else if (north = free & flit.y_dest < y & flit.dir ~= s) {
+        #go north
+        call go_north;
+      }
+      #go west if:
+      # 1)the current node is not the west edge,
+      # 2)the current node is at or east of the destination,
+      # 3)the packet is not traveling east OR the destination is directly north, and
+      # 4)the west link is fault-free
+      else if (west = free & x >= flit.x_dest & (flit.dir ~= e | (flit.y_dest > y & flit.x_dest = x))) {
+        #go west
+        call go_west;
+      }
+      #else south if:
+      # 1)the current node is not the south edge,
+      # 2)the current node is at or north of the destination,
+      # 3)the packet is not traveling north, and
+      # 4)the south link is fault-free
+      else if (south = free & y >= flit.y_dest & flit.dir ~= n) {
+        #go south
+        call go_south;
+      }
+      #else go east if:
+      # 1)the current node is at or west of the destination,
+      # 2)the east link is fault-free, and
+      # 3)the packet is not traveling west OR
+      # the destination is in the current column OR
+      # the destination is one node to the east AND not one node north
+      else if (x <= flit.x_dest & east = free & (flit.dir = w | x ~= flit.x_dest | (x + 1 = flit.x_dest & y + 1 ~= flit.y_dest)) ) {
+        #go east
+        call go_east;
+      }
+      #else go north if:
+      # 1)the current node is at or south of the destination,
+      # 2)the north link is fault-free, and
+      # 3)the packet is not traveling south OR
+      # the current node is at or west of the destination
+      else if (north = free & y <= flit.y_dest & (flit.dir ~= s | x <= flit.x_dest) ) {
+        #go north
+        call go_north;
+      }
+      #otherwise drop the flit
+      else {
+        flit.dropped := true;
+      }
+    }
+  } #end route
+  
+  export route
+  
+  
+} #end node_template
+
+instance node(X:coord,Y:coord) : node_template
+
+invariant flit.steps < 9
